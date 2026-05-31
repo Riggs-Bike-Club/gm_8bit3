@@ -1,0 +1,56 @@
+name: Build Linux
+
+on:
+  workflow_dispatch:        # lets you trigger it manually from the Actions tab
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout garrysmod_common
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          repository: danielga/garrysmod_common
+          path: garrysmod_common
+          ref: x86-64-support-sourcesdk
+
+      - name: Install dependencies (opus + toolchain)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopus-dev build-essential
+
+      - name: Supply opus static lib to premake
+        run: |
+          mkdir -p opus/lib64
+          cp /usr/lib/x86_64-linux-gnu/libopus.a opus/lib64/
+
+      - name: Install premake5
+        run: |
+          curl -L https://github.com/premake/premake-core/releases/download/v5.0.0-beta2/premake-5.0.0-beta2-linux.tar.gz -o premake.tar.gz
+          tar -xf premake.tar.gz
+
+      - name: Generate project
+        run: ./premake5 --gmcommon=garrysmod_common gmake2
+
+      - name: Build (x86_64, releasewithsymbols)
+        run: |
+          cd projects/linux/gmake2
+          # if this config name errors, run `make help` to list configs;
+          # fallback is `config=release_x86_64`
+          make config=releasewithsymbols_x86_64
+
+      - name: Locate built module
+        run: find projects -name 'gmsv_eightbit_*' -type f
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gmsv_eightbit_linux64
+          path: |
+            projects/**/gmsv_eightbit_linux64.dll
+            projects/**/gmsv_eightbit_*.so
+          if-no-files-found: error
