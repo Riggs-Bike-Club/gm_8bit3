@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-linux:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04   # glibc 2.39 — required by premake beta6 (needs >= 2.38)
     steps:
       - uses: actions/checkout@v4
 
@@ -20,22 +20,33 @@ jobs:
           path: garrysmod_common
           ref: 069a789df06d675d294961a20e8736aa070bd355   # x86-64-support-sourcesdk @ 2026-05
 
-      - name: Install toolchain
+      - name: Install toolchain (incl. 32-bit multilib)
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential autoconf automake libtool curl
+          sudo apt-get install -y build-essential gcc-multilib g++-multilib \
+                                  autoconf automake libtool curl
 
-      # The repo doesn't ship libopus; build it static + PIC and drop it where premake expects.
-      - name: Build static opus
+      # The repo doesn't ship libopus, so build it static + PIC for each arch
+      # and drop it where premake5.lua expects (opus/lib64 and opus/lib32).
+      - name: Build static opus (x86_64)
         run: |
           curl -sL https://downloads.xiph.org/releases/opus/opus-1.4.tar.gz -o opus.tgz
-          tar -xf opus.tgz
-          cd opus-1.4
+          mkdir opus64 && tar -xf opus.tgz -C opus64 --strip-components=1
+          cd opus64
           ./configure --enable-static --disable-shared --with-pic
-          make -j"$(nproc)"
+          make libopus.la -j"$(nproc)"
           cd ..
-          mkdir -p opus/lib64
-          cp opus-1.4/.libs/libopus.a opus/lib64/
+          mkdir -p opus/lib64 && cp opus64/.libs/libopus.a opus/lib64/
+
+      - name: Build static opus (x86 / 32-bit)
+        run: |
+          mkdir opus32 && tar -xf opus.tgz -C opus32 --strip-components=1
+          cd opus32
+          ./configure --enable-static --disable-shared --with-pic \
+                      --host=i686-linux-gnu CC="gcc -m32"
+          make libopus.la -j"$(nproc)"
+          cd ..
+          mkdir -p opus/lib32 && cp opus32/.libs/libopus.a opus/lib32/
 
       - name: Install premake5 (beta6 — beta2 lacks linktimeoptimization)
         run: |
@@ -43,19 +54,29 @@ jobs:
           tar -xf premake.tar.gz
           chmod +x premake5
 
+      # Requires PROJECT_GENERATOR_VERSION = 3 in premake5.lua to expose the x86_64 platform.
       - name: Generate project
         run: ./premake5 --gmcommon=garrysmod_common gmake2
 
-      - name: Build (x86_64, releasewithsymbols)
+      - name: Build 64-bit (gmsv_eightbit_linux64.dll)
         run: |
           cd projects/linux/gmake          # note: gmake, not gmake2
           make config=releasewithsymbols_x86_64 gmsv_eightbit
 
-      - name: Show artifact
-        run: file projects/linux/gmake/x86_64/ReleaseWithSymbols/gmsv_eightbit_linux64.dll
+      - name: Build 32-bit (gmsv_eightbit_linux.dll)
+        run: |
+          cd projects/linux/gmake
+          make config=releasewithsymbols_x86 gmsv_eightbit
+
+      - name: Show artifacts
+        run: |
+          file projects/linux/gmake/x86_64/ReleaseWithSymbols/gmsv_eightbit_linux64.dll
+          file projects/linux/gmake/x86/ReleaseWithSymbols/gmsv_eightbit_linux.dll
 
       - uses: actions/upload-artifact@v4
         with:
-          name: gmsv_eightbit_linux64
-          path: projects/linux/gmake/x86_64/ReleaseWithSymbols/gmsv_eightbit_linux64.dll
+          name: gmsv_eightbit_linux
+          path: |
+            projects/linux/gmake/x86_64/ReleaseWithSymbols/gmsv_eightbit_linux64.dll
+            projects/linux/gmake/x86/ReleaseWithSymbols/gmsv_eightbit_linux.dll
           if-no-files-found: error
