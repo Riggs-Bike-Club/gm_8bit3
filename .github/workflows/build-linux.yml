@@ -1,7 +1,7 @@
 name: Build Linux
 
 on:
-  workflow_dispatch:        # lets you trigger it manually from the Actions tab
+  workflow_dispatch:        # trigger manually from the Actions tab
   push:
     branches: [ main, master ]
 
@@ -11,46 +11,51 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout garrysmod_common
+      # Pinned to a known-good commit so the moving branch can't break the build again.
+      - name: Checkout garrysmod_common (pinned)
         uses: actions/checkout@v4
         with:
           submodules: recursive
           repository: danielga/garrysmod_common
           path: garrysmod_common
-          ref: x86-64-support-sourcesdk
+          ref: 069a789df06d675d294961a20e8736aa070bd355   # x86-64-support-sourcesdk @ 2026-05
 
-      - name: Install dependencies (opus + toolchain)
+      - name: Install toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y libopus-dev build-essential
+          sudo apt-get install -y build-essential autoconf automake libtool curl
 
-      - name: Supply opus static lib to premake
+      # The repo doesn't ship libopus; build it static + PIC and drop it where premake expects.
+      - name: Build static opus
         run: |
+          curl -sL https://downloads.xiph.org/releases/opus/opus-1.4.tar.gz -o opus.tgz
+          tar -xf opus.tgz
+          cd opus-1.4
+          ./configure --enable-static --disable-shared --with-pic
+          make -j"$(nproc)"
+          cd ..
           mkdir -p opus/lib64
-          cp /usr/lib/x86_64-linux-gnu/libopus.a opus/lib64/
+          cp opus-1.4/.libs/libopus.a opus/lib64/
 
-      - name: Install premake5
+      - name: Install premake5 (beta6 — beta2 lacks linktimeoptimization)
         run: |
-          curl -L https://github.com/premake/premake-core/releases/download/v5.0.0-beta2/premake-5.0.0-beta2-linux.tar.gz -o premake.tar.gz
+          curl -sL https://github.com/premake/premake-core/releases/download/v5.0.0-beta6/premake-5.0.0-beta6-linux.tar.gz -o premake.tar.gz
           tar -xf premake.tar.gz
+          chmod +x premake5
 
       - name: Generate project
         run: ./premake5 --gmcommon=garrysmod_common gmake2
 
       - name: Build (x86_64, releasewithsymbols)
         run: |
-          cd projects/linux/gmake2
-          # if this config name errors, run `make help` to list configs;
-          # fallback is `config=release_x86_64`
-          make config=releasewithsymbols_x86_64
+          cd projects/linux/gmake          # note: gmake, not gmake2
+          make config=releasewithsymbols_x86_64 gmsv_eightbit
 
-      - name: Locate built module
-        run: find projects -name 'gmsv_eightbit_*' -type f
+      - name: Show artifact
+        run: file projects/linux/gmake/x86_64/ReleaseWithSymbols/gmsv_eightbit_linux64.dll
 
       - uses: actions/upload-artifact@v4
         with:
           name: gmsv_eightbit_linux64
-          path: |
-            projects/**/gmsv_eightbit_linux64.dll
-            projects/**/gmsv_eightbit_*.so
+          path: projects/linux/gmake/x86_64/ReleaseWithSymbols/gmsv_eightbit_linux64.dll
           if-no-files-found: error
