@@ -1,0 +1,136 @@
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+# Shared note: requires PROJECT_GENERATOR_VERSION = 3 in premake5.lua (exposes x86_64),
+# and source/main.cpp line 69 (the per-packet std::cerr spam) removed.
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # LINUX  (verified end-to-end) -> gmsv_eightbit_linux.dll + gmsv_eightbit_linux64.dll
+  # ----------------------------------------------------------------------------
+  build-linux:
+    runs-on: ubuntu-24.04   # glibc 2.39 — premake beta6 needs >= 2.38
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout garrysmod_common (pinned)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          repository: danielga/garrysmod_common
+          path: garrysmod_common
+          ref: 069a789df06d675d294961a20e8736aa070bd355
+
+      - name: Install toolchain (incl. 32-bit multilib)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gcc-multilib g++-multilib \
+                                  autoconf automake libtool curl
+
+      - name: Build static opus (x86_64)
+        run: |
+          curl -sL https://downloads.xiph.org/releases/opus/opus-1.4.tar.gz -o opus.tgz
+          mkdir opus64 && tar -xf opus.tgz -C opus64 --strip-components=1
+          cd opus64
+          ./configure --enable-static --disable-shared --with-pic
+          make libopus.la -j"$(nproc)"
+          cd ..
+          mkdir -p opus/lib64 && cp opus64/.libs/libopus.a opus/lib64/
+
+      - name: Build static opus (x86 / 32-bit)
+        run: |
+          mkdir opus32 && tar -xf opus.tgz -C opus32 --strip-components=1
+          cd opus32
+          ./configure --enable-static --disable-shared --with-pic \
+                      --host=i686-linux-gnu CC="gcc -m32"
+          make libopus.la -j"$(nproc)"
+          cd ..
+          mkdir -p opus/lib32 && cp opus32/.libs/libopus.a opus/lib32/
+
+      - name: Install premake5 (beta6)
+        run: |
+          curl -sL https://github.com/premake/premake-core/releases/download/v5.0.0-beta6/premake-5.0.0-beta6-linux.tar.gz -o premake.tar.gz
+          tar -xf premake.tar.gz
+          chmod +x premake5
+
+      - name: Generate project
+        run: ./premake5 --gmcommon=garrysmod_common gmake2
+
+      - name: Build 64-bit
+        run: cd projects/linux/gmake && make config=releasewithsymbols_x86_64 gmsv_eightbit
+
+      - name: Build 32-bit
+        run: cd projects/linux/gmake && make config=releasewithsymbols_x86 gmsv_eightbit
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gmsv_eightbit_linux
+          path: |
+            projects/linux/gmake/x86_64/ReleaseWithSymbols/gmsv_eightbit_linux64.dll
+            projects/linux/gmake/x86/ReleaseWithSymbols/gmsv_eightbit_linux.dll
+          if-no-files-found: error
+
+  # ----------------------------------------------------------------------------
+  # WINDOWS -> gmsv_eightbit_win32.dll + gmsv_eightbit_win64.dll
+  # ----------------------------------------------------------------------------
+  build-windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout garrysmod_common (pinned)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          repository: danielga/garrysmod_common
+          path: garrysmod_common
+          ref: 069a789df06d675d294961a20e8736aa070bd355
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      # opus isn't shipped; build it static with the /MT runtime (matches
+      # garrysmod_common's staticruntime("On")), for x64 and Win32.
+      - name: Build static opus (both archs)
+        shell: pwsh
+        run: |
+          curl.exe -sL https://downloads.xiph.org/releases/opus/opus-1.4.tar.gz -o opus.tgz
+          tar -xf opus.tgz
+          $rt = "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW", "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded"
+          # x64
+          cmake -S opus-1.4 -B opus64 -A x64 -DOPUS_BUILD_SHARED_LIBRARY=OFF $rt
+          cmake --build opus64 --config Release
+          New-Item -ItemType Directory -Force opus/lib64 | Out-Null
+          Copy-Item opus64/Release/opus.lib opus/lib64/opus.lib
+          # Win32
+          cmake -S opus-1.4 -B opus32 -A Win32 -DOPUS_BUILD_SHARED_LIBRARY=OFF $rt
+          cmake --build opus32 --config Release
+          New-Item -ItemType Directory -Force opus/lib32 | Out-Null
+          Copy-Item opus32/Release/opus.lib opus/lib32/opus.lib
+
+      - name: Install premake5 (beta6)
+        shell: pwsh
+        run: |
+          curl.exe -sL https://github.com/premake/premake-core/releases/download/v5.0.0-beta6/premake-5.0.0-beta6-windows.zip -o premake.zip
+          tar -xf premake.zip
+
+      - name: Generate project
+        run: ./premake5.exe --gmcommon=garrysmod_common vs2022
+
+      - name: Build 64-bit (x64)
+        run: msbuild projects/windows/vs2022/eightbit.sln /p:Configuration=ReleaseWithSymbols /p:Platform=x64
+
+      - name: Build 32-bit (Win32)
+        run: msbuild projects/windows/vs2022/eightbit.sln /p:Configuration=ReleaseWithSymbols /p:Platform=Win32
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gmsv_eightbit_windows
+          path: |
+            projects/windows/vs2022/x86_64/ReleaseWithSymbols/gmsv_eightbit_win64.dll
+            projects/windows/vs2022/x86/ReleaseWithSymbols/gmsv_eightbit_win32.dll
+          if-no-files-found: error
